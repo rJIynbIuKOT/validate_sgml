@@ -134,7 +134,3 @@ chmod +x validate_sgml.py graph_sect.py
 ```
 
 Подробности — в [`README_graph_sect.md`](README_graph_sect.md).
-
-## Лицензия
-
-MIT
