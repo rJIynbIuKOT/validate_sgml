@@ -250,8 +250,42 @@ class SGMLValidator:
                             ))
                             break
                 
+                self._validate_section_level(tag_name, line_num)
+                
                 self.tag_stack.append((tag_name, line_num))
                 self.last_tag = (tag_name, line_num)
+
+    SECTION_LEVEL_PATTERN = re.compile(r'^(sect|refsect)([1-9])$')
+
+    def _validate_section_level(self, tag_name: str, line_num: int):
+        """Проверяет, что sectN/refsectN вложен в sect(N-1)/refsect(N-1) без пропуска уровней"""
+        match = self.SECTION_LEVEL_PATTERN.match(tag_name)
+        if not match:
+            return
+        prefix, level = match.group(1), int(match.group(2))
+
+        # Ближайшая открытая секция того же семейства
+        for stacked_tag, stacked_line in reversed(self.tag_stack):
+            parent_match = self.SECTION_LEVEL_PATTERN.match(stacked_tag)
+            if parent_match and parent_match.group(1) == prefix:
+                parent_level = int(parent_match.group(2))
+                break
+        else:
+            # Фрагмент файла может начинаться с любого уровня (подключаемые файлы)
+            return
+
+        # Секция того же уровня уже обрабатывается проверкой незакрытого предыдущего sectN
+        if parent_level == level or parent_level == level - 1:
+            return
+
+        expected = f"{prefix}{parent_level + 1}"
+        if parent_level < level:
+            message = (f"Пропущен уровень вложенности: <{tag_name}> внутри <{stacked_tag}> "
+                       f"(строка {stacked_line}), ожидался <{expected}>")
+        else:
+            message = (f"Неверный уровень вложенности: <{tag_name}> внутри <{stacked_tag}> "
+                       f"(строка {stacked_line}), ожидался <{expected}>")
+        self.errors.append(ValidationError(line=line_num, message=message, tag=tag_name))
 
     def _check_bare_text(self, text: str, line_num: int):
         """Проверяет, что текстовый узел не находится напрямую внутри блочного контейнера"""
@@ -473,6 +507,42 @@ def _prompt_for_target() -> str:
         return ""
 
 
+def _read_key() -> str:
+    """Читает одну клавишу без ожидания Enter (терминал в raw-режиме)."""
+    try:
+        import msvcrt
+        return msvcrt.getwch()
+    except ImportError:
+        pass
+
+    import termios
+    import tty
+    fd = sys.stdin.fileno()
+    old_settings = termios.tcgetattr(fd)
+    try:
+        tty.setraw(fd)
+        return sys.stdin.read(1)
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+
+
+def _ask_repeat() -> bool:
+    """Ждёт Enter (повторить проверку) или Space (выход). Возвращает True для повтора."""
+    print()
+    print("Нажмите Enter чтобы повторить проверку.")
+    print("Нажмите Space для выхода...", flush=True)
+    while True:
+        try:
+            key = _read_key()
+        except (EOFError, KeyboardInterrupt):
+            return False
+        if key in ('\r', '\n'):
+            return True
+        # Ctrl+C / Ctrl+D в raw-режиме приходят как символы
+        if key in (' ', '\x03', '\x04', ''):
+            return False
+
+
 def _pause():
     """Ждёт нажатия Enter, чтобы окно терминала не закрылось автоматически."""
     print()
@@ -518,22 +588,27 @@ def main():
         target = sys.argv[1]
         pattern = sys.argv[2] if len(sys.argv) > 2 else "**/*.sgml"
 
+    while True:
+        exit_code = _run_validation(target, pattern)
+        if not interactive or not _ask_repeat():
+            break
+        print("\n" + "=" * 80 + "\n")
+
+    sys.exit(exit_code)
+
+
+def _run_validation(target: str, pattern: str) -> int:
+    """Проверяет файл или директорию, возвращает код выхода."""
     target_path = Path(target)
-    exit_code: int
 
     if target_path.is_file():
         is_valid = validate_file(target)
-        exit_code = 0 if is_valid else 1
-    elif target_path.is_dir():
+        return 0 if is_valid else 1
+    if target_path.is_dir():
         _, invalid = validate_directory(target, pattern)
-        exit_code = 0 if invalid == 0 else 1
-    else:
-        print(f"❌ Путь не найден: {target}")
-        exit_code = 1
-
-    if interactive:
-        _pause()
-    sys.exit(exit_code)
+        return 0 if invalid == 0 else 1
+    print(f"❌ Путь не найден: {target}")
+    return 1
 
 
 if __name__ == "__main__":
